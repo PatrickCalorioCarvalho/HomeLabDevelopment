@@ -1,0 +1,88 @@
+---
+# Roda contra o lxc-postgres. Chamado automaticamente pelo terraform_data.postgres_stack
+# (terraform/main.tf), mas pode ser reaplicado na mão a qualquer momento:
+#
+#   ansible-playbook -i '<ip-do-lxc>,' -u root -e ansible_password=<senha> \
+#     -e postgres_db_name=app -e postgres_user=app -e postgres_password=<senha-db> \
+#     lxc-postgres.yml
+#
+# Precisa de "sshpass" instalado no controlador (auth por senha, não por chave):
+#   sudo apt install sshpass
+#
+- name: Sobe/atualiza PostgreSQL no lxc-postgres
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    postgres_db_name: app
+    postgres_user: app
+    # postgres_password vem de fora (terraform), sem default de propósito
+
+  tasks:
+    - name: Espera o container aceitar conexão SSH
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+    - name: Instala o PostgreSQL
+      ansible.builtin.apt:
+        name:
+          - postgresql
+          - python3-psycopg2
+        state: present
+        update_cache: true
+
+    - name: Garante que o PostgreSQL está rodando e habilitado
+      ansible.builtin.systemd:
+        name: postgresql
+        state: started
+        enabled: true
+
+    - name: Descobre o arquivo de config do PostgreSQL (a versão varia por distro)
+      ansible.builtin.find:
+        paths: /etc/postgresql
+        patterns: postgresql.conf
+        recurse: true
+      register: pg_conf_find
+
+    - name: Define os caminhos de config
+      ansible.builtin.set_fact:
+        pg_conf_path: "{{ pg_conf_find.files[0].path }}"
+        pg_hba_path: "{{ pg_conf_find.files[0].path | dirname }}/pg_hba.conf"
+
+    - name: Escuta em todas as interfaces (não só localhost)
+      ansible.builtin.lineinfile:
+        path: "{{ pg_conf_path }}"
+        regexp: '^#?listen_addresses\s*='
+        line: "listen_addresses = '*'"
+      notify: restart postgresql
+
+    - name: Permite conexão da rede local (192.168.18.0/24)
+      ansible.builtin.lineinfile:
+        path: "{{ pg_hba_path }}"
+        line: "host all all 192.168.18.0/24 scram-sha-256"
+        insertafter: EOF
+      notify: restart postgresql
+
+    - name: Aplica handlers pendentes antes de criar usuário/banco
+      ansible.builtin.meta: flush_handlers
+
+    - name: Cria o usuário da aplicação
+      become_user: postgres
+      community.postgresql.postgresql_user:
+        name: "{{ postgres_user }}"
+        password: "{{ postgres_password }}"
+        state: present
+
+    - name: Cria o banco da aplicação
+      become_user: postgres
+      community.postgresql.postgresql_db:
+        name: "{{ postgres_db_name }}"
+        owner: "{{ postgres_user }}"
+        state: present
+
+  handlers:
+    - name: restart postgresql
+      ansible.builtin.systemd:
+        name: postgresql
+        state: restarted

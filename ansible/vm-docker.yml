@@ -1,0 +1,66 @@
+---
+# Roda contra a vm-docker. Chamado automaticamente pelo terraform_data.vm_docker_stack
+# (terraform/main.tf), mas pode ser reaplicado na mão a qualquer momento:
+#
+#   ansible-playbook -i '<ip-da-vm>,' -u ubuntu -e ansible_password=<senha> vm-docker.yml
+#
+# Precisa de "sshpass" instalado no controlador (auth por senha, não por chave):
+#   sudo apt install sshpass
+#
+- name: Sobe/atualiza Docker + Portainer na vm-docker
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    ollama_url: "" # http://<ip-do-lxc-ollama>:11434, passado pelo terraform
+
+  tasks:
+    - name: Espera a VM aceitar conexão SSH
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+    - name: Instala o Docker Engine (script oficial get.docker.com)
+      ansible.builtin.shell:
+        cmd: set -o pipefail && curl -fsSL https://get.docker.com | sh
+        executable: /bin/bash
+        creates: /usr/bin/docker
+
+    - name: Garante que o Docker está rodando e habilitado
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Instala o SDK docker pro python (necessário pro módulo docker_container)
+      ansible.builtin.apt:
+        name: python3-docker
+        state: present
+        update_cache: true
+
+    - name: Container do Portainer (gerenciamento dos seus containers/projetos)
+      community.docker.docker_container:
+        name: portainer
+        image: portainer/portainer-ce:lts
+        state: started
+        restart_policy: always
+        ports:
+          - "8000:8000"
+          - "9443:9443"
+        volumes:
+          - /var/run/docker.sock:/var/run/docker.sock
+          - portainer_data:/data
+
+    - name: Container do Open WebUI (fala com o Ollama do lxc-ollama pela rede)
+      when: ollama_url | length > 0
+      community.docker.docker_container:
+        name: open-webui
+        image: ghcr.io/open-webui/open-webui:main
+        state: started
+        restart_policy: always
+        ports:
+          - "8080:8080"
+        env:
+          OLLAMA_BASE_URL: "{{ ollama_url }}"
+        volumes:
+          - open-webui:/app/backend/data

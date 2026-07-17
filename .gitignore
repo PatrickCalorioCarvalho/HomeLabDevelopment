@@ -1,0 +1,12 @@
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.lock.hcl
+!*.tfvars.example
+crash.log
+crash.*.log
+
+# Chave SSH gerada pelo terraform pros LXCs
+terraform/.ssh/

@@ -1,0 +1,145 @@
+---
+# Roda contra o lxc-ollama. Chamado automaticamente pelo terraform_data.ollama_stack
+# (terraform/main.tf), mas pode ser reaplicado na mão a qualquer momento:
+#
+#   ansible-playbook -i '<ip-do-lxc>,' -u root -e ansible_password=<senha> \
+#     -e enable_gpu_passthrough=true -e nvidia_driver_version=595.58.03 \
+#     lxc-ollama.yml
+#
+# Precisa de "sshpass" instalado no controlador (auth por senha, não por chave):
+#   sudo apt install sshpass
+#
+# Ollama roda NATIVO aqui (sem Docker) - não precisa de nvidia-container-toolkit
+# nem lida com AppArmor (que não funciona direito dentro de um LXC). Docker só
+# existe na vm-docker (Open WebUI roda lá, apontando pro IP desse LXC).
+#
+# ATENÇÃO GPU: o /dev/nvidia* já chega pro container via device passthrough
+# (terraform), mas o driver USERSPACE tem que ser instalado aqui dentro
+# TAMBÉM, com a MESMA versão do driver que está rodando no host - senão dá
+# "Driver/library version mismatch" no nvidia-smi. Se isso acontecer, confira
+# a versão real com "cat /proc/driver/nvidia/version" no host e ajuste
+# nvidia_driver_version.
+- name: Sobe/atualiza Ollama no lxc-ollama
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    enable_gpu_passthrough: false
+    nvidia_driver_version: "595.58.03"
+    ollama_model: "llama3.2:1b"
+
+  tasks:
+    - name: Espera o container aceitar conexão SSH
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+    - name: Migração - remove containers docker de uma versão anterior deste playbook (usava Docker; agora é nativo)
+      ansible.builtin.command: "docker rm -f ollama open-webui"
+      changed_when: true
+      failed_when: false
+
+    - name: Instala dependências básicas (o template LXC é mínimo, nem tem curl/zstd)
+      ansible.builtin.apt:
+        name:
+          - curl
+          - ca-certificates
+          - zstd
+        state: present
+        update_cache: true
+
+    - name: GPU - instala dependências pro instalador da NVIDIA
+      when: enable_gpu_passthrough | bool
+      ansible.builtin.apt:
+        name:
+          - build-essential
+          - pkg-config
+        state: present
+
+    - name: GPU - baixa o instalador .run do driver (mesma versão do host)
+      when: enable_gpu_passthrough | bool
+      ansible.builtin.get_url:
+        url: "https://us.download.nvidia.com/XFree86/Linux-x86_64/{{ nvidia_driver_version }}/NVIDIA-Linux-x86_64-{{ nvidia_driver_version }}.run"
+        dest: "/tmp/nvidia-driver-{{ nvidia_driver_version }}.run"
+        mode: "0755"
+
+    - name: GPU - instala só as libs userspace (sem módulo de kernel - o container não tem kernel próprio)
+      when: enable_gpu_passthrough | bool
+      ansible.builtin.command:
+        cmd: >
+          /tmp/nvidia-driver-{{ nvidia_driver_version }}.run
+          --no-kernel-module --silent --no-nouveau-check
+          --install-libglvnd --no-questions
+        creates: /usr/bin/nvidia-smi
+
+    - name: GPU - confirma que a versão bate com o host
+      when: enable_gpu_passthrough | bool
+      ansible.builtin.command: nvidia-smi
+      register: nvidia_smi_check
+      changed_when: false
+      failed_when: false
+
+    - name: GPU - mostra o resultado (se der "version mismatch", ajuste nvidia_driver_version)
+      when: enable_gpu_passthrough | bool
+      ansible.builtin.debug:
+        var: nvidia_smi_check.stdout_lines
+
+    - name: Instala o Ollama (script oficial, nativo - sem Docker)
+      ansible.builtin.shell:
+        cmd: set -o pipefail && curl -fsSL https://ollama.com/install.sh | sh
+        executable: /bin/bash
+        creates: /usr/local/bin/ollama
+
+    - name: Cria o diretório de override do serviço do Ollama
+      ansible.builtin.file:
+        path: /etc/systemd/system/ollama.service.d
+        state: directory
+        mode: "0755"
+
+    - name: Configura o Ollama pra escutar na rede (não só localhost)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/ollama.service.d/override.conf
+        content: |
+          [Service]
+          Environment="OLLAMA_HOST=0.0.0.0"
+        mode: "0644"
+      notify: reload e reinicia ollama
+
+    - name: Aplica handlers pendentes antes de usar o ollama
+      ansible.builtin.meta: flush_handlers
+
+    - name: Garante que o Ollama está rodando e habilitado
+      ansible.builtin.systemd:
+        name: ollama
+        state: started
+        enabled: true
+
+    - name: Puxa um modelo pequeno no Ollama (pra já ter algo pra testar)
+      ansible.builtin.command: "ollama pull {{ ollama_model }}"
+      register: ollama_pull
+      changed_when: "'success' in ollama_pull.stdout"
+      retries: 3
+      delay: 10
+      until: ollama_pull.rc == 0
+
+    - name: Carrega o modelo em memória (força o ollama a escolher CPU/GPU)
+      ansible.builtin.command: "ollama run {{ ollama_model }} oi"
+      register: ollama_run
+      changed_when: false
+      failed_when: false
+
+    - name: Confere se o ollama está usando CPU ou GPU pra esse modelo
+      ansible.builtin.command: ollama ps
+      changed_when: false
+      register: ollama_ps
+
+    - name: Mostra o resultado do "ollama ps" (procure por "GPU" na coluna PROCESSOR)
+      ansible.builtin.debug:
+        var: ollama_ps.stdout_lines
+
+  handlers:
+    - name: reload e reinicia ollama
+      ansible.builtin.systemd:
+        daemon_reload: true
+        name: ollama
+        state: restarted
