@@ -52,6 +52,8 @@
           - portainer_data:/data
 
     - name: Container do Open WebUI (fala com o Ollama do lxc-ollama pela rede)
+      # Porta movida de 8080 pra 8081: 8080 é a porta padrão da UI do SigNoz
+      # (ver tasks abaixo), e os dois containers rodam nessa mesma VM.
       when: ollama_url | length > 0
       community.docker.docker_container:
         name: open-webui
@@ -59,8 +61,53 @@
         state: started
         restart_policy: always
         ports:
-          - "8080:8080"
+          - "8081:8080"
         env:
           OLLAMA_BASE_URL: "{{ ollama_url }}"
         volumes:
           - open-webui:/app/backend/data
+
+    # O instalador oficial (foundry.sh) não documenta em que caminho exato
+    # deixa o binário - e como todas as tasks aqui rodam com become (root),
+    # é o $HOME de root que importa, não o do usuário SSH (ubuntu). Por
+    # isso descobrimos o caminho depois de instalar em vez de arriscar um
+    # caminho fixo.
+    - name: Instala o foundryctl (instalador oficial do SigNoz), se ainda não estiver no PATH
+      ansible.builtin.shell:
+        cmd: set -o pipefail && command -v foundryctl || (curl -fsSL https://signoz.io/foundry.sh | bash)
+        executable: /bin/bash
+      register: foundryctl_install
+      changed_when: "'foundryctl' not in foundryctl_install.stdout or foundryctl_install.stderr != ''"
+
+    - name: Descobre o caminho do binário foundryctl instalado
+      ansible.builtin.shell:
+        cmd: command -v foundryctl || find /root /usr/local/bin /opt -maxdepth 4 -name foundryctl -type f 2>/dev/null | head -n1
+        executable: /bin/bash
+      register: foundryctl_path
+      changed_when: false
+      failed_when: foundryctl_path.stdout | trim | length == 0
+
+    - name: Cria o diretório de config do SigNoz
+      ansible.builtin.file:
+        path: /opt/signoz
+        state: directory
+        mode: "0755"
+
+    - name: Escreve o casting.yaml do SigNoz (deploy via Docker Compose)
+      ansible.builtin.copy:
+        dest: /opt/signoz/casting.yaml
+        mode: "0644"
+        content: |
+          apiVersion: v1alpha1
+          kind: Installation
+          metadata:
+            name: signoz
+          spec:
+            deployment:
+              flavor: compose
+              mode: docker
+
+    - name: Sobe/atualiza o SigNoz (foundryctl cast = valida + gera + inicia os containers)
+      ansible.builtin.command: "{{ foundryctl_path.stdout | trim }} cast -f /opt/signoz/casting.yaml"
+      register: signoz_cast
+      changed_when: true
