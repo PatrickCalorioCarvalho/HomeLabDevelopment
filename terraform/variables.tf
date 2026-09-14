@@ -59,8 +59,9 @@ variable "cores" {
 }
 
 variable "memory" {
-  type    = number
-  default = 4096
+  description = "8192 (8GB) pra caber o SigNoz (sozinho ja pede uns 4GB de Docker) junto com Portainer/Open WebUI/ByteGasto."
+  type        = number
+  default     = 8192
 }
 
 variable "disk_size" {
