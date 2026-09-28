@@ -184,3 +184,20 @@ variable "postgres_password" {
   type        = string
   sensitive   = true
 }
+
+#############################################
+# edge: gateway de homologação (Traefik + ngrok) na vm-docker
+#############################################
+
+variable "ngrok_authtoken" {
+  description = "Token de CONTA ngrok (https://dashboard.ngrok.com/get-started/your-authtoken) - reaproveitado entre projetos, não é por-projeto. Deixe em branco (\"\") pra não subir o container ngrok (o Traefik continua no ar, só sem túnel externo)."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "ngrok_url" {
+  description = "Domínio estático reservado no ngrok (https://dashboard.ngrok.com/domains) - plano free só permite 1 por conta. Ex: https://algo-aleatorio.ngrok-free.app. Deixe em branco pra usar um endereço aleatório (muda a cada restart do container ngrok)."
+  type        = string
+  default     = ""
+}

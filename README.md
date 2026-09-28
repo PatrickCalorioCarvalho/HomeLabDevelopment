@@ -128,7 +128,7 @@ string com espaço dentro passada entre aspas.
 Cada ambiente tem seu próprio playbook, reaplicável na mão a qualquer
 momento sem precisar recriar a VM/LXC (são todos idempotentes):
 
-- `ansible/vm-docker.yml` - Docker + Portainer + Open WebUI na vm-docker.
+- `ansible/vm-docker.yml` - Docker + Portainer + Open WebUI + gateway de homologação (Traefik + ngrok) na vm-docker.
 - `ansible/lxc-ollama.yml` - Ollama nativo (+ GPU) no lxc-ollama, sem Docker.
 - `ansible/lxc-postgres.yml` - PostgreSQL no lxc-postgres.
 
@@ -137,9 +137,22 @@ momento sem precisar recriar a VM/LXC (são todos idempotentes):
 | Serviço | Onde | Porta |
 |---|---|---|
 | Portainer | vm-docker | 9443 (https) |
-| Open WebUI | vm-docker | 8080 |
+| Open WebUI | vm-docker | 8081 |
+| Traefik (dashboard) | vm-docker | 8090 |
+| ngrok (dashboard, gateway) | vm-docker | 4042 |
 | Ollama API | lxc-ollama | 11434 |
 | PostgreSQL | lxc-postgres | 5432 |
+
+## Gateway de homologação (Traefik + ngrok)
+
+Rodando na vm-docker, gerenciado por Ansible junto com o resto (não é um
+projeto à parte - sobe/atualiza com o mesmo `terraform apply`/`ansible-playbook
+vm-docker.yml` que já cuida do Portainer/Open WebUI/SigNoz). Serve de ponto
+único de acesso externo pra teste/validação dos meus outros projetos
+(CLKThingsManager, StrideClash, CLKCheckOrder, ...) - resolve o limite do
+plano free do ngrok (1 domínio estático por conta) sem precisar de um túnel
+por projeto. Ver [`docs/HOMOLOGACAO.md`](docs/HOMOLOGACAO.md) pra
+arquitetura, o que está registrado hoje e como adicionar um projeto novo.
 
 Os IPs (DHCP) saem nos outputs do `terraform apply`: `vm_ipv4`,
 `ollama_ipv4`, `postgres_ipv4`.
@@ -154,6 +167,7 @@ importantes pra revisar antes do primeiro apply:
 - `postgres_db_name`, `postgres_user`, `postgres_password` - banco/usuário criados dentro do Postgres.
 - `enable_gpu` - liga/desliga o device passthrough da GPU pro lxc-ollama.
 - `nvidia_driver_version` - **tem que bater exatamente** com a versão instalada no host.
+- `ngrok_authtoken`, `ngrok_url` - gateway de homologação (Traefik + ngrok, ver `docs/HOMOLOGACAO.md`). Deixe `ngrok_authtoken` em branco pra não subir o túnel externo (o Traefik continua no ar, só LAN).
 
 ## Estrutura do repo
 
@@ -169,9 +183,12 @@ terraform/
 ansible/
   run.sh           # ponte WSL <-> ansible-playbook (chamado pelo terraform)
   requirements.yml # collections (community.docker, community.postgresql)
-  vm-docker.yml    # Docker + Portainer + Open WebUI na vm-docker
+  vm-docker.yml    # Docker + Portainer + Open WebUI + gateway (Traefik/ngrok) na vm-docker
   lxc-ollama.yml   # Ollama nativo (+ GPU) no lxc-ollama, sem Docker
   lxc-postgres.yml # PostgreSQL no lxc-postgres
+  files/edge/      # config do Traefik copiada pra vm-docker - ver docs/HOMOLOGACAO.md
+docs/
+  HOMOLOGACAO.md   # spec do gateway de homologação (Traefik + ngrok)
 ```
 
 ## Notas / troubleshooting

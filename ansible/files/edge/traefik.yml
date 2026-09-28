@@ -1,0 +1,39 @@
+# Config estatica do Traefik. Roteamento pros projetos vem principalmente do
+# provider "docker" (labels no docker-compose.yml de cada projeto - só
+# funciona porque agora todos rodam na MESMA vm-docker, no mesmo Docker
+# daemon que o Traefik consulta via /var/run/docker.sock). O provider "file"
+# (dynamic/routes.yml) fica como fallback manual pra quando um projeto não
+# puder rodar aqui (ex: outro host, ou algo não-Docker) - ver
+# docs/HOMOLOGACAO.md.
+
+entryPoints:
+  web:
+    address: ":80"
+
+  # Nome "traefik" e especial: e o entrypoint que o dashboard/API usa quando
+  # api.insecure=true (ver https://doc.traefik.io/traefik/operations/api/).
+  traefik:
+    address: ":8090"
+
+providers:
+  docker:
+    endpoint: "unix:///var/run/docker.sock"
+    # Só cria rota pra container que tiver "traefik.enable=true" - sem isso,
+    # o Traefik tentaria rotear TUDO que roda na vm-docker (Portainer, Open
+    # WebUI, SigNoz, os bancos dos projetos...).
+    exposedByDefault: false
+    # Rede que o Traefik usa pra alcançar os containers (precisa ser a mesma
+    # que cada projeto conecta o serviço que quer expor - ver
+    # docs/HOMOLOGACAO.md "Como registrar um projeto novo").
+    network: edge
+
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+api:
+  dashboard: true
+  insecure: true # ok pra homolog: so exposto na 8090, que o ngrok nunca tunela
+
+log:
+  level: INFO

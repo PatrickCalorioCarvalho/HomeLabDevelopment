@@ -1,0 +1,31 @@
+# Fallback manual do provider "file" - só usado por projeto que NÃO roda na
+# vm-docker (outro host, ou algo não-Docker). CLKThingsManager, StrideClash e
+# CLKCheckOrder hoje rodam todos aqui e são roteados por LABEL no
+# docker-compose.yml de cada um (provider "docker" - ver ../traefik.yml e
+# docs/HOMOLOGACAO.md), não por este arquivo.
+#
+# Vazio de propósito. Modelo genérico de quando um projeto futuro tiver que
+# ficar NUM HOST SEPARADO (se ele puder rodar na vm-docker, prefira labels -
+# mais simples, sem editar nada aqui) - descomente e ajuste:
+#
+# http:
+#   routers:
+#     meu-projeto:
+#       rule: "PathPrefix(`/meu-projeto`)"
+#       service: meu-projeto
+#       priority: 50
+#       middlewares:
+#         - meu-projeto-strip
+#
+#   middlewares:
+#     meu-projeto-strip:
+#       stripPrefix:
+#         prefixes:
+#           - "/meu-projeto"
+#
+#   services:
+#     meu-projeto:
+#       loadBalancer:
+#         servers:
+#           - url: "http://<ip-do-host>:<porta>"
+

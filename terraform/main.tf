@@ -138,10 +138,15 @@ resource "terraform_data" "vm_docker_stack" {
   triggers_replace = [
     proxmox_virtual_environment_vm.vm_docker.id,
     filemd5("${path.module}/../ansible/vm-docker.yml"),
+    # Config do gateway (Traefik + ngrok) - editar routes.yml pra
+    # registrar/atualizar um projeto e rodar "terraform apply" já reaplica,
+    # sem recriar a VM (só reroda o playbook - ver terraform_data).
+    filemd5("${path.module}/../ansible/files/edge/traefik.yml"),
+    filemd5("${path.module}/../ansible/files/edge/dynamic/routes.yml"),
   ]
 
   provisioner "local-exec" {
-    command = "wsl bash ${local.ansible_dir_wsl}/run.sh vm-docker.yml ${local.vm_docker_ip} ${var.vm_ssh_username} ${var.vm_ssh_password} ollama_url=http://${local.ollama_ip}:11434"
+    command = "wsl bash ${local.ansible_dir_wsl}/run.sh vm-docker.yml ${local.vm_docker_ip} ${var.vm_ssh_username} ${var.vm_ssh_password} ollama_url=http://${local.ollama_ip}:11434 ngrok_authtoken=${var.ngrok_authtoken} ngrok_url=${var.ngrok_url}"
   }
 
   depends_on = [proxmox_virtual_environment_vm.vm_docker, proxmox_virtual_environment_container.ollama]

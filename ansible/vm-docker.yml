@@ -2,7 +2,10 @@
 # Roda contra a vm-docker. Chamado automaticamente pelo terraform_data.vm_docker_stack
 # (terraform/main.tf), mas pode ser reaplicado na mão a qualquer momento:
 #
-#   ansible-playbook -i '<ip-da-vm>,' -u ubuntu -e ansible_password=<senha> vm-docker.yml
+#   ansible-playbook -i '<ip-da-vm>,' -u ubuntu -e ansible_password=<senha> \
+#     -e ollama_url=http://<ip-do-lxc-ollama>:11434 \
+#     -e ngrok_authtoken=<token> -e ngrok_url=<dominio-fixo> \
+#     vm-docker.yml
 #
 # Precisa de "sshpass" instalado no controlador (auth por senha, não por chave):
 #   sudo apt install sshpass
@@ -14,6 +17,8 @@
 
   vars:
     ollama_url: "" # http://<ip-do-lxc-ollama>:11434, passado pelo terraform
+    ngrok_authtoken: "" # credencial de CONTA ngrok, passado pelo terraform (var.ngrok_authtoken)
+    ngrok_url: "" # domínio fixo reservado no ngrok, passado pelo terraform (var.ngrok_url)
 
   tasks:
     - name: Espera a VM aceitar conexão SSH
@@ -67,6 +72,100 @@
         volumes:
           - open-webui:/app/backend/data
 
+    # --- Gateway de homologação (Traefik + ngrok) ---
+    # Ponto único de acesso externo pra teste/validação dos outros projetos
+    # (CLKThingsManager, StrideClash, ...) - ver docs/HOMOLOGACAO.md. Existe
+    # aqui (não em cada projeto) porque resolve o limite do plano free do
+    # ngrok (1 domínio estático por conta): só ESTE túnel usa o domínio fixo,
+    # o Traefik roteia pra cada projeto por PathPrefix.
+    - name: Cria a rede docker do gateway (pra o ngrok resolver "traefik" pelo nome)
+      community.docker.docker_network:
+        name: edge
+        state: present
+
+    - name: Cria o diretório de config do Traefik (e o subdiretório dynamic/)
+      ansible.builtin.file:
+        path: /opt/edge/dynamic
+        state: directory
+        recurse: true
+        mode: "0755"
+
+    - name: Copia a config estática do Traefik
+      ansible.builtin.copy:
+        src: files/edge/traefik.yml
+        dest: /opt/edge/traefik.yml
+        mode: "0644"
+      notify: restart traefik
+
+    - name: Copia a config dinâmica do Traefik (routers/services pros projetos)
+      ansible.builtin.copy:
+        src: files/edge/dynamic/routes.yml
+        dest: /opt/edge/dynamic/routes.yml
+        mode: "0644"
+      # Não precisa notify: o provider "file" do Traefik recarrega sozinho
+      # (watch: true no traefik.yml) - só copiar o arquivo já basta.
+
+    - name: Container do Traefik (roteador do gateway)
+      community.docker.docker_container:
+        name: traefik
+        # v3.1 tentava falar com o Docker sempre na API 1.24 (fixo, ignorando
+        # DOCKER_API_VERSION) - Docker Engine recente (instalado via
+        # get.docker.com, Docker 29+) já não aceita nada abaixo de 1.40 e
+        # rejeitava a conexão ("client version 1.24 is too old"). v3.6+
+        # negocia a versão automaticamente com o daemon - ver
+        # https://github.com/traefik/traefik/issues/12253.
+        image: traefik:v3.6
+        state: started
+        restart_policy: always
+        command: --configFile=/etc/traefik/traefik.yml
+        networks:
+          - name: edge
+        ports:
+          - "80:80"
+          # Dashboard - só LAN. 8090 pra não brigar com o SigNoz (usa 8080
+          # nesta mesma VM).
+          - "8090:8090"
+        volumes:
+          - /opt/edge/traefik.yml:/etc/traefik/traefik.yml:ro
+          - /opt/edge/dynamic:/etc/traefik/dynamic:ro
+          # Provider "docker" (labels) - é assim que o Traefik descobre os
+          # containers dos outros projetos sem precisar de routes.yml, desde
+          # que rodem nesta mesma vm-docker.
+          - /var/run/docker.sock:/var/run/docker.sock:ro
+
+    # Só sobe se ngrok_authtoken foi passado - sem ele, o Traefik continua no
+    # ar (acessível na LAN), só não tem túnel externo.
+    - name: Container do ngrok (único túnel externo, aponta pro Traefik)
+      when: ngrok_authtoken | length > 0
+      community.docker.docker_container:
+        name: ngrok
+        image: ngrok/ngrok:latest
+        state: started
+        restart_policy: always
+        networks:
+          - name: edge
+        env:
+          NGROK_AUTHTOKEN: "{{ ngrok_authtoken }}"
+          NGROK_URL: "{{ ngrok_url }}"
+        entrypoint:
+          - sh
+          - -c
+        # Só passa --url se NGROK_URL estiver definido, senão o ngrok
+        # reclama de um valor vazio (mesmo padrão de quando isso rodava via
+        # docker-compose.ngrok.yml nos outros projetos).
+        command:
+          - |
+            if [ -n "$NGROK_URL" ]; then
+              exec ngrok http --log=stdout --log-format=logfmt traefik:80 --url="$NGROK_URL"
+            else
+              exec ngrok http --log=stdout --log-format=logfmt traefik:80
+            fi
+        ports:
+          # 4042 (não 4040/4041): evita conflito se o ngrok próprio de algum
+          # projeto (CLKThingsManager usa 4040, StrideClash usa 4041) rodar
+          # nesta mesma VM.
+          - "4042:4040"
+
     # O instalador oficial (foundry.sh) não documenta em que caminho exato
     # deixa o binário - e como todas as tasks aqui rodam com become (root),
     # é o $HOME de root que importa, não o do usuário SSH (ubuntu). Por
@@ -111,3 +210,13 @@
       ansible.builtin.command: "{{ foundryctl_path.stdout | trim }} cast -f /opt/signoz/casting.yaml"
       register: signoz_cast
       changed_when: true
+
+  handlers:
+    # A config dinâmica (routes.yml) recarrega sozinha (watch: true), mas a
+    # estática (traefik.yml - entrypoints, providers) só é lida na
+    # inicialização - por isso só ela reinicia o container quando muda.
+    - name: restart traefik
+      community.docker.docker_container:
+        name: traefik
+        state: started
+        restart: true
